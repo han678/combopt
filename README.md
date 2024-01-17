@@ -4,8 +4,6 @@ The following examples generate Figure 3 (a) binary weights and (b) ternary weig
 ```bash
 cd singleLayer
 python demo1.py
-```
-```bash
 python demo2.py
 ```
 
