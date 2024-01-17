@@ -2,6 +2,7 @@ This is the code for "Combinatorial optimization for low bit-width neural networ
 #### Demos
 The following examples generate Figure 3 (a) binary weights and (b) ternary weights in our paper.
 ```bash
+cd singleLayer
 python demo1.py
 ```
 ```bash
