@@ -9,6 +9,7 @@ python demo2.py
 #### Experiments for two-layer networks and MLP models
 ```bash
 cd mlp
-python binary_opt.py
+python binary_opt.py --opt_strategy
 ```
+'''opt_strategy''' can be greedy or submodular.
 
