@@ -53,7 +53,7 @@ def update_w(new_model, x, targets):
     else:
         wx_sum = torch.unsqueeze(wx.sum(dim=1), 1)
     bias = torch.sub(pred.detach(), wx_sum)
-    return yw, bias
+    return yw, w, bias
 
 
 def calculate_fan_in(tensor):
@@ -69,9 +69,8 @@ def calculate_fan_in(tensor):
 
 
 class BinarySubOpt():
-
     def __init__(self, model, device=torch.device("cpu"), epochs=20, arch="FC2", seed=0, temp=0.05,
-                 loss_fc=logistic_loss, path='result/MNIST/'):
+                 loss_fc=logistic_loss):
         # count the number of Conv2d and Linear
         count_targets = 0
         self.bin_index = []
@@ -99,7 +98,7 @@ class BinarySubOpt():
         self.use_cuda = self.device == torch.device("cuda")
         self.model = model.to(self.device)
         self.epochs = epochs
-        self.save_path = path + 'Binary/Submodular/'
+        self.save_path = 'result/Submodel/'
         os.makedirs(self.save_path, exist_ok=True)
         self.save_model_path = self.save_path + "{}_init{}_{}.pt".format(self.model._get_name(), self.model.init,
                                                                          self.seed)
@@ -107,22 +106,16 @@ class BinarySubOpt():
         self.tmp_acc = 0.
         self.best_loss = 100.
         self.best_acc = 0.
-        self.std = 0
         return
 
     def submodularOpt(self, trainset, testset):
         self.binarizeConvParams(trainset, testset)
         return self.model
 
-    def load_state(self):
-        state = torch.load(self.save_model_path)
-        print("Accuracy of the pretrained binarized model is: {}".format(state['acc']))
-        self.model.load_state_dict(state['state_dict'])
-
     def binarizeConvParams(self, trainset, testset):
         time1 = time.time()
-        result = open('{}{}_init{}_{}_{}.log'.format(self.save_path, self.model._get_name(), self.model.init, self.seed,
-                                                     self.model.n_hidden), mode='a', encoding='utf-8')
+        result = open('{}{}_init{}_{}.log'.format(self.save_path, self.model._get_name(), self.model.init, self.seed),
+                      mode='a', encoding='utf-8')
         output_result = {'train_acc': [], 'test_acc': [], 'train_loss': [], 'test_loss': []}
         printLog(result, 'Pretrained model:')
         inputs, y = trainset.tensors[0].to(self.device), trainset.tensors[1].to(self.device)
@@ -136,13 +129,14 @@ class BinarySubOpt():
                     x = new_model.forward(inputs)
                     W = self.target_modules[self.bin_index.index(idx)].detach()
                     s = W[0].shape
-                    yw, bias = update_w(new_model, x, y)
+                    yw, w, bias = update_w(new_model, x, y)
                     row_list = list(range(W.shape[0]))
                     for iteration in range(W.shape[0]):
                         # update the weights for every output channel
                         np.random.seed(self.seed)
                         i = np.random.choice(row_list)
                         row_list.remove(i)
+                        W.requires_grad = False
                         beta = np.sqrt(2 / calculate_fan_in(W))
                         if m.Linear == False:
                             # Wx_r
@@ -152,6 +146,7 @@ class BinarySubOpt():
                             Wx_r = m.conv(x).detach()
                             self.restore()
                             ri = update_ri(Wx_r, yw, y, bias)
+                            del Wx_r
                             ywi = torch.transpose(yw, 0, 1)[i].unsqueeze(dim=1)
                             Wi = submodularConv(x, m, beta, ywi, W[i], ri)
                             W[i] = Wi.view(s)
@@ -163,13 +158,13 @@ class BinarySubOpt():
                             Wx_r = m.linear(x).detach()
                             self.restore()
                             ri = update_ri(Wx_r, yw, y, bias)
+                            del Wx_r
                             ywi = yw[:, i].unsqueeze(dim=1)
                             # update Wi
                             Wi = submodularFC(x, ywi, ri, beta)
                             W[i] = Wi.reshape(1, -1)
-                        del ywi, ri
                         # check whether to save the change via Accept and Reject algorithm
-                        train_loss, _, train_acc, c2 = self.test_perf(trainset)
+                        train_loss, train_acc, c2 = self.test_perf(trainset)
                         diff = (self.tmp_loss - train_loss) / self.tmp_loss
                         marg_prob = tempSigmoid(diff, temp=self.temp)
                         new_seed = self.seed + i
@@ -179,8 +174,7 @@ class BinarySubOpt():
                             self.tmp_loss = train_loss
                             self.tmp_acc = train_acc
                             self.save_params()
-                            del yw, bias
-                            yw, bias = update_w(new_model, x, y)
+                            yw, w, bias = update_w(new_model, x, y)
                             self.target_modules[self.bin_index.index(idx)].data.copy_(W)
                             if m.Linear == False:
                                 printLog(result,
@@ -194,20 +188,20 @@ class BinarySubOpt():
 
                         else:
                             self.restore()
-                    torch.cuda.empty_cache()
                     self.updateLastClassifier(inputs, y)
-                    train_loss, train_loss_std, train_acc, c2 = self.test_perf(trainset)
+                    train_loss, train_acc, c2 = self.test_perf(trainset)
                     self.tmp_loss = train_loss
                     self.tmp_acc = train_acc
                     printLog(result,
-                             '\nEpoch: {}, Module Name:{}, Accept ratio: {}/{}'.format(epoch, name, accept_freq,
+                             'Epoch: {}, Module Name:{}, Accept ratio: {}/{}\n'.format(epoch, name, accept_freq,
                                                                                          W.shape[0]))
+                else:
+                    pass
+            self.save_state()
             self.save_print_result(trainset, testset, output_result, file=result)
-        printLog(result, "best testing loss is {} with std {} and accuracy {}\n\n".format(self.best_loss, self.std,
-                                                                                          self.best_acc))
+        printLog(result, "\nbest testing loss is {} with accuracy {}".format(self.best_loss, self.best_acc))
         time2 = time.time()
         printLog(result, "Training time: ", time2 - time1, "seconds")
-        self.plot(output_result)
 
     def accept_and_reject(self, seed):
         # sample based on marginal probability
@@ -216,39 +210,18 @@ class BinarySubOpt():
         return rand
 
     def save_print_result(self, trainset, testset, output_result, file):
-        train_loss, train_loss_std, train_acc, c2 = self.test_perf(trainset)
-        test_loss, test_loss_std, test_acc, c1 = self.test_perf(testset)
+        train_loss, train_acc, c2 = self.test_perf(trainset)
+        test_loss, test_acc, c1 = self.test_perf(testset)
         torch.cuda.empty_cache()
         for key in output_result:
             exec('output_result[key].append(' + key + ')')
         printLog(file,
-                 'Train Loss: {} with standard deviation {}, Accuracy: {}/{} ({:.2f}%)'.format(train_loss,
-                                                                                               train_loss_std, c2,
-                                                                                               len(trainset),
-                                                                                               train_acc))
-        printLog(file,
-                 'Test Loss: {} with standard deviation {}, Accuracy: {}/{} ({:.2f}%)'.format(test_loss, test_loss_std,
-                                                                                              c1, len(testset),
-                                                                                              test_acc))
+                 'Train Loss: {}, Train Accuracy: {}/{} ({:.2f}%)'.format(train_loss, c2, len(trainset), train_acc))
+        printLog(file, 'Test Loss: {}, Test Accuracy: {}/{} ({:.2f}%)'.format(test_loss, c1, len(testset), test_acc))
         if self.best_loss >= test_loss:
             self.best_loss = test_loss
             self.best_acc = test_acc
-            self.std = test_loss_std
         return train_loss, train_acc, test_loss, test_acc
-
-    def test_perf(self, testset):
-        self.model.eval()
-        # For every epoch, compute loss and testing accuracy
-        test_features, test_labels = testset.tensors[0].to(self.device), testset.tensors[1].to(self.device)
-        with torch.no_grad():
-            output_final = self.model(test_features)
-            pred = torch.where(torch.sigmoid(output_final) >= 0.5, torch.tensor(1).to(self.device),
-                               torch.tensor(-1).to(self.device))
-            correct = pred.eq(test_labels.view_as(pred)).sum().item()
-            accuracy = 100. * correct / len(test_labels)
-            loss_mean, loss_std = self.loss_fc(output_final, test_labels.reshape(-1, 1), returnSTD=True)
-        torch.cuda.empty_cache()
-        return loss_mean.item(), loss_std.item(), accuracy, correct
 
     def updateLastClassifier(self, train_features, train_labels):
         layer_set = list(self.model.body.named_children())
@@ -291,33 +264,16 @@ class BinarySubOpt():
         for index in range(self.num_of_params):
             self.target_modules[index].data.copy_(self.saved_params[index])
 
-    def plot(self, output_result):
-        fig, ax = plt.subplots(figsize=(6, 6))
-        plt.subplot(111)
-        plt.title("Loss / Iteration")
-        plt.xlabel("Iteration")
-        plt.ylabel("Loss")
-        x = np.arange(1, len(output_result['test_loss']) + 1, step=1)
-        line1, = plt.plot(x, output_result['test_loss'][0:], marker='.', label='Test')
-        line2, = plt.plot(x, output_result['train_loss'][0:], marker='.', label='Train')
-        plt.legend(handler_map={line1: HandlerLine2D(numpoints=32)})
-        plt.show()
-        fig.savefig(
-            self.save_path + "{}_Loss_init{}_{}_{}.png".format(self.model._get_name(), self.model.init, self.seed,
-                                                               self.model.n_hidden))
-        plt.close(fig)
-
-        fig, ax = plt.subplots(figsize=(6, 6))
-        plt.subplot(111)
-        plt.title("Accuracy / Iteration")
-        plt.xlabel("Iteration")
-        plt.ylabel("Accuracy")
-        x = np.arange(1, len(output_result['test_acc']) + 1, step=1)
-        line1, = plt.plot(x, output_result['test_acc'][0:], marker='.', label='Test')
-        line2, = plt.plot(x, output_result['train_acc'][0:], marker='.', label='Train')
-        plt.legend(handler_map={line1: HandlerLine2D(numpoints=32)})
-        plt.show()
-        fig.savefig(
-            self.save_path + "{}_Accuracy_init{}_{}_{}.png".format(self.model._get_name(), self.model.init, self.seed,
-                                                                   self.model.n_hidden))
-        plt.close(fig)
+    def test_perf(self, testset):
+        self.model.eval()
+        # For every epoch, compute loss and testing accuracy
+        test_features, test_labels = testset.tensors[0].to(self.device), testset.tensors[1].to(self.device)
+        with torch.no_grad():
+            output_final = self.model(test_features)
+            pred = torch.where(torch.sigmoid(output_final) >= 0.5, torch.tensor(1).to(self.device),
+                               torch.tensor(-1).to(self.device))
+            correct = pred.eq(test_labels.view_as(pred)).sum().item()
+            accuracy = 100. * correct / len(test_labels)
+            loss = self.loss_fc(output_final, test_labels.reshape(-1, 1)).item() / len(test_labels)
+            torch.cuda.empty_cache()
+        return loss, accuracy, correct
