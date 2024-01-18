@@ -1,4 +1,3 @@
-import os
 import time
 
 import matplotlib.pyplot as plt
@@ -8,7 +7,7 @@ import torch.nn as nn
 from matplotlib.legend_handler import HandlerLine2D
 from sklearn.linear_model import LogisticRegression
 from torch.autograd import Variable
-
+import os
 from models import BinBlock, logistic_loss
 from submodular.binaryOpt import printLog, tempSigmoid, calculate_fan_in
 from submodular.dynamic_model import dynamic_model
@@ -84,7 +83,7 @@ def greedy_FC(x, Wx, Wi, beta, targets, new_model, i):
 class BinaryGreedy():
 
     def __init__(self, model, device=torch.device("cpu"), epochs=20, arch="FC2", seed=0, temp=0.05,
-                 loss_fc=logistic_loss, path='result/MNIST/'):
+                 loss_fc=logistic_loss):
         # count the number of Conv2d and Linear
         count_targets = 0
         self.bin_index = []
@@ -98,6 +97,7 @@ class BinaryGreedy():
                 self.bin_index.append(pos)
                 count_targets = count_targets + 1
             pos += 1
+        # self.bin_index = [self.bin_index[0]]  ### check the case that only updates one conv layer
         self.saved_params = []
         self.target_modules = []
         self.num_of_params = len(self.bin_index)
@@ -112,22 +112,16 @@ class BinaryGreedy():
         self.device = device
         self.model = model.to(self.device)
         self.epochs = epochs
-        self.save_path = path + 'Binary/GreedyCD/'
+        self.save_path = 'result/Greedy/'
         os.makedirs(self.save_path, exist_ok=True)
-        self.save_model_path = self.save_path + "{}_init{}_{}_{}.pt".format(self.model._get_name(), self.model.init,
-                                                                            self.seed, self.model.n_hidden)
+        self.save_model_path = self.save_path + "{}_init{}_{}.pt".format(self.model._get_name(), self.model.init,
+                                                                         self.seed)
         self.tmp_loss = 100.
         self.tmp_acc = 0.
         self.best_loss = 100.
         self.best_acc = 0.
         self.accept_ratio_list = []
-        self.std = 0
         return
-
-    def load_state(self):
-        state = torch.load(self.save_model_path)
-        print("Accuracy of the pretrained binarized model is: {}".format(state['acc']))
-        self.model.load_state_dict(state['state_dict'])
 
     def save_state(self):
         print('==> Saving model ...')
@@ -147,8 +141,8 @@ class BinaryGreedy():
 
     def binarizeConvParams(self, trainset, testset):
         time1 = time.time()
-        result = open('{}{}_init{}_{}_{}.log'.format(self.save_path, self.model._get_name(), self.model.init, self.seed,
-                                                     self.model.n_hidden), mode='a', encoding='utf-8')
+        result = open('{}{}_init{}_{}.log'.format(self.save_path, self.model._get_name(), self.model.init, self.seed),
+                      mode='a', encoding='utf-8')
         output_result = {'train_acc': [], 'test_acc': [], 'train_loss': [], 'test_loss': []}
         printLog(result, 'Pretrained model:')
         inputs, targets = trainset.tensors[0].to(self.device), trainset.tensors[1].to(self.device)
@@ -178,7 +172,7 @@ class BinaryGreedy():
                                 self.restore()
                                 Wi = greedyConv(x, m, beta, W, i, Wx_r, targets, new_model)
                                 W[i] = Wi.view(s)
-                                train_loss, _, train_acc, c2 = self.test_perf(trainset)
+                                train_loss, train_acc, c2 = self.test_perf(trainset)
                                 diff = (self.tmp_loss - train_loss) / self.tmp_loss
                                 marg_prob = tempSigmoid(diff, temp=self.temp)
                                 new_seed = self.seed + i
@@ -190,9 +184,10 @@ class BinaryGreedy():
                                     self.save_params()
                                     self.target_modules[self.bin_index.index(idx)].data.copy_(W)
                                     printLog(result,
-                                             'Output channel {}, Train Loss: {}, Train Accuracy: {:.2f}%'.format(i + 1,
-                                                                                                                 train_loss,
-                                                                                                                 train_acc))
+                                             'Output channel {}, Train Loss: {}, Train Accuracy: {}/{} ({:.2f}%)'.format(
+                                                 i + 1, train_loss, c2,
+                                                 len(trainset),
+                                                 train_acc))
                                 else:
                                     self.restore()
                         elif m.Linear == True:
@@ -209,7 +204,7 @@ class BinaryGreedy():
                                 self.restore()
                                 W[i, :] = greedy_FC(x, Wx_r, W[i, :], beta, targets, new_model, i)
                                 # check whether to save the change via Accept and Reject algorithm
-                                train_loss, _, train_acc, c2 = self.test_perf(trainset)
+                                train_loss, train_acc, c2 = self.test_perf(trainset)
                                 diff = self.tmp_loss - train_loss
                                 marg_prob = tempSigmoid(diff, temp=self.temp)
                                 new_seed = self.seed + i
@@ -220,52 +215,44 @@ class BinaryGreedy():
                                     self.tmp_acc = train_acc
                                     self.save_params()
                                     self.target_modules[self.bin_index.index(idx)].data.copy_(W)
-                                    printLog(result, 'Row: {}, Train Loss: {}, Train Accuracy: {:.2f}%'.format(i + 1,
+                                    printLog(result,
+                                             'Row: {}, Train Loss: {}, Train Accuracy: {}/{} ({:.2f}%)'.format(i + 1,
                                                                                                                train_loss,
+                                                                                                               c2,
+                                                                                                               len(trainset),
                                                                                                                train_acc))
                                 else:
                                     self.restore()
                         self.updateLastClassifier(inputs, targets)
-                        train_loss, train_loss_std, train_acc, c2 = self.test_perf(trainset)
-                        self.tmp_loss = train_loss
-                        self.tmp_acc = train_acc
                         printLog(result,
-                                 '\nEpoch: {}, Module Name:{}, Accept ratio: {}/{}'.format(epoch, name, accept_freq,
-                                                                                           W.shape[0]))
+                                 'Epoch: {}, Module Name:{}, Accept ratio: {}/{}'.format(epoch, name, accept_freq,
+                                                                                         W.shape[0]))
                     else:
                         pass
+                self.save_state()
                 self.save_print_result(trainset, testset, output_result, file=result)
-        printLog(result, "best testing loss is {} with std {} and accuracy {}\n\n".format(self.best_loss, self.std,
-                                                                                          self.best_acc))
+        printLog(result, "best testing loss is {} with accuracy {}\n\n".format(self.best_loss, self.best_acc))
         time2 = time.time()
         printLog(result, "Training time: ", time2 - time1, "seconds")
-        self.plot(output_result)
 
     def accept_and_reject(self, seed):
         # sample based on marginal probability
-        np.random.seed(seed)
+        np.random.seed(seed)  # set seed
         rand = np.random.rand()
         return rand
 
     def save_print_result(self, trainset, testset, output_result, file):
-        train_loss, train_loss_std, train_acc, c2 = self.test_perf(trainset)
-        test_loss, test_loss_std, test_acc, c1 = self.test_perf(testset)
+        train_loss, train_acc, c2 = self.test_perf(trainset)
+        test_loss, test_acc, c1 = self.test_perf(testset)
         torch.cuda.empty_cache()
         for key in output_result:
             exec('output_result[key].append(' + key + ')')
         printLog(file,
-                 'Train Loss: {} with standard deviation {}, Accuracy: {}/{} ({:.2f}%)'.format(train_loss,
-                                                                                               train_loss_std, c2,
-                                                                                               len(trainset),
-                                                                                               train_acc))
-        printLog(file,
-                 'Test Loss: {} with standard deviation {}, Accuracy: {}/{} ({:.2f}%)'.format(test_loss, test_loss_std,
-                                                                                              c1, len(testset),
-                                                                                              test_acc))
+                 'Train Loss: {}, Train Accuracy: {}/{} ({:.2f}%)'.format(train_loss, c2, len(trainset), train_acc))
+        printLog(file, 'Test Loss: {}, Test Accuracy: {}/{} ({:.2f}%)'.format(test_loss, c1, len(testset), test_acc))
         if self.best_loss >= test_loss:
             self.best_loss = test_loss
             self.best_acc = test_acc
-            self.std = test_loss_std
         return train_loss, train_acc, test_loss, test_acc
 
     def updateLastClassifier(self, train_features, train_labels):
@@ -312,6 +299,7 @@ class BinaryGreedy():
     def test_perf(self, testset):
         self.model.eval()
         # For every epoch, compute loss and testing accuracy
+        torch.cuda.empty_cache()
         test_features, test_labels = testset.tensors[0].to(self.device), testset.tensors[1].to(self.device)
         with torch.no_grad():
             output_final = self.model(test_features)
@@ -319,37 +307,6 @@ class BinaryGreedy():
                                torch.tensor(-1).to(self.device))
             correct = pred.eq(test_labels.view_as(pred)).sum().item()
             accuracy = 100. * correct / len(test_labels)
-            loss_mean, loss_std = self.loss_fc(output_final, test_labels.reshape(-1, 1), returnSTD=True)
-        torch.cuda.empty_cache()
-        return loss_mean.item(), loss_std.item(), accuracy, correct
-
-    def plot(self, output_result):
-        fig, ax = plt.subplots(figsize=(6, 6))
-        plt.subplot(111)
-        plt.title("Loss / Iteration")
-        plt.xlabel("Iteration")
-        plt.ylabel("Loss")
-        x = np.arange(1, len(output_result['test_loss']) + 1, step=1)
-        line1, = plt.plot(x, output_result['test_loss'][0:], marker='.', label='Test')
-        line2, = plt.plot(x, output_result['train_loss'][0:], marker='.', label='Train')
-        plt.legend(handler_map={line1: HandlerLine2D(numpoints=32)})
-        plt.show()
-        fig.savefig(
-            self.save_path + "{}_Loss_init{}_{}_{}.png".format(self.model._get_name(), self.model.init, self.seed,
-                                                               self.model.n_hidden))
-        plt.close(fig)
-
-        fig, ax = plt.subplots(figsize=(6, 6))
-        plt.subplot(111)
-        plt.title("Accuracy / Iteration")
-        plt.xlabel("Iteration")
-        plt.ylabel("Accuracy")
-        x = np.arange(1, len(output_result['test_acc']) + 1, step=1)
-        line1, = plt.plot(x, output_result['test_acc'][0:], marker='.', label='Test')
-        line2, = plt.plot(x, output_result['train_acc'][0:], marker='.', label='Train')
-        plt.legend(handler_map={line1: HandlerLine2D(numpoints=32)})
-        plt.show()
-        fig.savefig(
-            self.save_path + "{}_Accuracy_init{}_{}_{}.png".format(self.model._get_name(), self.model.init, self.seed,
-                                                                   self.model.n_hidden))
-        plt.close(fig)
+            loss = self.loss_fc(output_final, test_labels.reshape(-1, 1)).item() / len(test_labels)
+            torch.cuda.empty_cache()
+        return loss, accuracy, correct
